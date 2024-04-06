@@ -118,7 +118,7 @@ def prepare_model_for_lora(model):
     return model
 
 def get_model(model_name, approach, dataset):
-    tokenizer = get_tokenizer(MODEL_NAME)
+    tokenizer = get_tokenizer(model_name)
     if approach == Approach.ICL:
         model = get_icl_model(model_name)
     elif approach == Approach.FT:
