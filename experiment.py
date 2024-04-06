@@ -128,7 +128,7 @@ def get_model(model_name, approach, dataset):
         raise ValueError(f"{approach.value} is not a valid learning approach!")
     return tokenizer, model
 
-def run_in_context_learning_experiment(tokenizer, model, dataset):
+def run_in_context_learning_experiment(tokenizer, model, dataset, num_seeds):
     dataset_dict = get_dataset(dataset)
     train_dataset = tokenize_dataset(dataset_dict["train"])
     test_dataset = tokenize_dataset(dataset_dict["test"])
@@ -155,7 +155,7 @@ def run_in_context_learning_experiment(tokenizer, model, dataset):
 
     return None
 
-def run_fine_tuning_experiment(tokenizer, model, dataset):
+def run_fine_tuning_experiment(tokenizer, model, dataset, num_seeds):
     dataset_dict = get_dataset(dataset)
     train_dataset = tokenize_dataset(dataset_dict["train"])
     test_dataset = tokenize_dataset(dataset_dict["test"])
@@ -187,21 +187,30 @@ def run_fine_tuning_experiment(tokenizer, model, dataset):
 def save_results(results):
     return None
 
+def positive_number(value):
+    ivalue = int(value)
+    if ivalue < 1:
+        raise argparse.ArgumentTypeError(f"{ivalue} is not a valid positive number!")
+    return ivalue
+
 parser = argparse.ArgumentParser(description="Experiment runner for ICL vs FT study")
 parser.add_argument("-approach", choices=[approach.name for approach in Approach], required=True,
                     help="The learning approach to use for the experiment")
 parser.add_argument("-dataset", choices=[dataset.name for dataset in Dataset], required=True,
                     help="The dataset to use for the experiment")
+parser.add_argument("-num_seeds", type=positive_number,
+                    help="The number of seeds to run the experiment against")
 
 args = parser.parse_args()
 approach = Approach(args.approach)
 dataset = Dataset(args.dataset)
+num_seeds = args.num_seeds if args.num_seeds else 1
 tokenizer, model = get_model(MODEL_NAME, approach, dataset)
 
 if approach == Approach.ICL:
-    results = run_in_context_learning_experiment(tokenizer, model, dataset)
+    results = run_in_context_learning_experiment(tokenizer, model, dataset, num_seeds)
 elif approach == Approach.FT:
-    results = run_fine_tuning_experiment(tokenizer, model, dataset)
+    results = run_fine_tuning_experiment(tokenizer, model, dataset, num_seeds)
 else:
     raise ValueError(f"{approach.value} is not a valid learning approach!")
 
