@@ -4,14 +4,29 @@ import evaluate
 import torch
 import numpy as np
 import pandas as pd
+from torch.utils.data import Dataset, random_split
 from random import randint
 from enum import Enum
+from sklearn.metrics import mean_squared_error
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModelForSequenceClassification, AutoConfig
-from transformers import TrainingArguments, Trainer, DataCollatorWithPadding
-from peft import LoraConfig, TaskType, get_peft_model
+from transformers import TrainingArguments, Trainer, DataCollatorWithPadding, BitsAndBytesConfig
+from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
 from datasets import load_dataset
 
 MODEL_NAME = "mistralai/Mistral-7B-v0.1"
+
+class RegressionDataset(Dataset):
+    def __init__(self, encodings, labels):
+        self.encodings = encodings
+        self.labels = labels
+
+    def __getitem__(self, idx):
+        item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
+        item['labels'] = torch.tensor(self.labels[idx], dtype=torch.float32)
+        return item
+
+    def __len__(self):
+        return len(self.labels)
 
 class Approach(Enum):
     ICL = 1
@@ -21,7 +36,7 @@ class Dataset(Enum):
     DairAiEmotion = 1
     ClimatebertClimateDetection = 2
     RottenTomatoes = 3
-    PszemrajSyntheticTextSimilarity = 4
+    PhilipMayStsbMultiMt = 4
     Se2pCodeReadabilityMerged = 5
     ZpnBaceRegression = 6
     HelsinkiNlpOpus100 = 7
@@ -40,8 +55,8 @@ def get_dataset(dataset):
         return load_dataset("climatebert/climate_detection")
     elif dataset == Dataset.RottenTomatoes:
         return load_dataset("rotten_tomatoes")
-    elif dataset == Dataset.PszemrajSyntheticTextSimilarity:
-        return load_dataset("pszemraj/synthetic-text-similarity")
+    elif dataset == Dataset.PhilipMayStsbMultiMt:
+        return load_dataset("PhilipMay/stsb_multi_mt", "en")
     elif dataset == Dataset.Se2pCodeReadabilityMerged:
         return load_dataset("se2p/code-readability-merged")
     elif dataset == Dataset.ZpnBaceRegression:
@@ -54,16 +69,62 @@ def get_dataset(dataset):
         return load_dataset("cnn_dailymail", "3.0.0")
     else:
         raise ValueError("f{dataset.value} is not a valid dataset!")
-    
-def tokenize_dataset(tokenizer, dataset):
-    def tokenize(sample):
-        return tokenizer(sample['text'])
-    return dataset.map(tokenize, batched=True)
+
+def prepare_classification_dataset(tokenizer, dataset):
+    tokenize = lambda sample: tokenizer(sample['text'])
+    dataset_dict = get_dataset(dataset)
+    train_dataset = dataset_dict["train"].map(tokenize,batched=True)
+    test_dataset = dataset_dict["test"].map(tokenize, batched=True)
+    return train_dataset, test_dataset
+
+def prepare_regression_dataset(tokenizer, dataset):
+    dataset_dict = get_dataset(dataset)
+    if dataset == Dataset.PhilipMayStsbMultiMt:
+        delimiter = "[SEP]"
+        train_dataset = dataset_dict["train"]
+        train_encodings = tokenizer([sample["sentence1"] + delimiter + sample["sentence2"] for sample in train_dataset])
+        train_labels = [sample["similarity_score"] for sample in train_dataset]
+        test_dataset = dataset_dict["test"]
+        test_encodings = tokenizer([sample["sentence1"] + delimiter + sample["sentence2"] for sample in test_dataset])
+        test_labels = [sample["similarity_score"] for sample in test_dataset]
+        train_dataset = RegressionDataset(train_encodings, train_labels)
+        test_dataset = RegressionDataset(test_encodings, test_labels)
+    elif dataset == Dataset.Se2pCodeReadabilityMerged:
+        dataset = dataset_dict["train"]
+        encodings = tokenizer([sample["code_snippet"] for sample in dataset])
+        labels = [sample["score"] for sample in dataset]
+        regression_dataset = RegressionDataset(encodings, labels)
+        train_size = int(0.8 * len(regression_dataset))
+        test_size = len(regression_dataset) - train_size
+        train_dataset, test_dataset = random_split(regression_dataset, [train_size, test_size])
+    elif dataset == Dataset.ZpnBaceRegression:
+        delimiter = "[SEP]"
+        train_dataset = dataset_dict["train"]
+        train_encodings = tokenizer([sample["smiles"] + delimiter + sample["selfies"] for sample in train_dataset])
+        train_labels = [sample["target"] for sample in train_dataset]
+        test_dataset = dataset_dict["test"]
+        test_encodings = tokenizer([sample["smiles"] + delimiter + sample["selfies"] for sample in test_dataset])
+        test_labels = [sample["target"] for sample in test_dataset]
+        train_dataset = RegressionDataset(train_encodings, train_labels)
+        test_dataset = RegressionDataset(test_encodings, test_labels)
+    else:
+        raise ValueError("f{dataset.value} is not a valid regression dataset!")
+    return train_dataset, test_dataset
+
+
+def prepare_dataset(tokenizer, dataset):
+    task = get_task(dataset)
+    if task == Task.Classification:
+        return prepare_classification_dataset(tokenizer, dataset)
+    elif task == Task.Regression:
+        return prepare_regression_dataset(tokenizer, dataset)
+    else:
+        raise ValueError("f{task.value} is not a valid task!")
     
 def get_task(dataset):
     if dataset == Dataset.DairAiEmotion or dataset == Dataset.ClimatebertClimateDetection or dataset == Dataset.RottenTomatoes:
         return Task.Classification
-    elif dataset == Dataset.PszemrajSyntheticTextSimilarity or dataset == Dataset.Se2pCodeReadabilityMerged or dataset == Dataset.ZpnBaceRegression:
+    elif dataset == Dataset.PhilipMayStsbMultiMt or dataset == Dataset.Se2pCodeReadabilityMerged or dataset == Dataset.ZpnBaceRegression:
         return Task.Regression
     elif dataset == Dataset.HelsinkiNlpOpus100 or dataset == Dataset.DatabricksDolly15k or dataset == Dataset.CnnDailyMail:
         return Task.Generation
@@ -88,39 +149,49 @@ def get_tokenizer(model_name):
 def get_icl_model(model_name):
     return AutoModelForCausalLM.from_pretrained(model_name)
 
-def get_classification_model(model_name, labels, tokenizer):
-    config = AutoConfig.from_pretrained(MODEL_NAME)
+def get_classification_model(model_name, labels, tokenizer, quantization_config):
+    config = AutoConfig.from_pretrained(model_name)
     config.num_labels = len(labels)
     config.id2label = {i: label for i, label in enumerate(labels)}
     config.label2id = {label: i for i, label in config.id2label.items()}
     config.pad_token_id = tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0]
-    return AutoModelForSequenceClassification.from_pretrained(model_name, config=config)
+    return AutoModelForSequenceClassification.from_pretrained(model_name, config=config, quantization_config=quantization_config)
 
-def get_regression_model(model_name):
-    return None
+def get_regression_model(model_name, tokenizer, quantization_config):
+    config = AutoConfig.from_pretrained(model_name)
+    config.num_labels = 1
+    config.pad_token_id = tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0]
+    return AutoModelForSequenceClassification.from_pretrained(model_name, config=config, quantization_config=quantization_config)
 
-def get_generation_model(model_name):
+def get_generation_model(model_name, quantization_config):
     return None
 
 def get_ft_model(model_name, dataset, tokenizer):
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16)
+
     task = get_task(dataset)
-    labels = get_labels(dataset)
     if task == Task.Classification:
-        return get_classification_model(model_name, labels, tokenizer)
+        labels = get_labels(dataset)
+        return get_classification_model(model_name, labels, tokenizer, quantization_config)
     elif task == Task.Regression:
-        return get_regression_model(model_name)
+        return get_regression_model(model_name, tokenizer, quantization_config)
     elif task == Task.Generation:
-        return get_generation_model(model_name)
+        return get_generation_model(model_name, quantization_config)
     else:
         raise ValueError("f{task.value} is not a valid task!")
 
-def prepare_model_for_lora(model):
+def prepare_model_for_peft(model):
     lora_config = LoraConfig(
         r=64, lora_alpha=16,
         target_modules=[
             "q_proj","k_proj", "v_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj", "lm_head"],
         bias="none", lora_dropout=0.05, task_type=TaskType.SEQ_CLS)
+    model = prepare_model_for_kbit_training(model)
     model = get_peft_model(model, lora_config)
     return model
 
@@ -130,7 +201,7 @@ def get_model(model_name, approach, dataset):
         model = get_icl_model(model_name)
     elif approach == Approach.FT:
         model = get_ft_model(model_name, dataset, tokenizer)
-        model = prepare_model_for_lora(model)
+        model = prepare_model_for_peft(model)
     else:
         raise ValueError(f"{approach.value} is not a valid learning approach!")
     return tokenizer, model
@@ -146,9 +217,7 @@ def get_system_prompt(dataset):
         raise ValueError("f{dataset.value} is not a valid dataset!")
 
 def run_in_context_learning_experiment(tokenizer, model, dataset, experiment_number):
-    dataset_dict = get_dataset(dataset)
-    train_dataset = tokenize_dataset(tokenizer, dataset_dict["train"])
-    test_dataset = tokenize_dataset(tokenizer, dataset_dict["test"])
+    train_dataset, test_dataset = prepare_dataset(tokenizer, dataset)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
@@ -177,16 +246,29 @@ def run_in_context_learning_experiment(tokenizer, model, dataset, experiment_num
     experiment_name = f'mistral_in_context_learning_{dataset.name}_experiment{experiment_number}'
     save_results(results, experiment_name)
 
+def get_compute_metrics(dataset):
+    task = get_task(dataset)
+    if task == Task.Classification:
+        accuracy = evaluate.load('accuracy')
+        def compute_metrics(eval_pred):
+            predictions, labels = eval_pred
+            predictions = np.argmax(predictions, axis=1)
+            return accuracy.compute(predictions=predictions, references=labels)
+    elif task == Task.Regression:
+        def compute_metrics(eval_pred):
+            predictions, labels = eval_pred
+            mse = mean_squared_error(labels, predictions)
+            return {"mse": mse}
+    else:
+        raise ValueError("f{task.value} is not a valid task!")
+    return compute_metrics
+
 def fine_tune(tokenizer, model, train_dataset, test_dataset, experiment_name):
     model.train()
 
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
-    accuracy = evaluate.load('accuracy')
-    def compute_metrics(eval_pred):
-        predictions, labels = eval_pred
-        predictions = np.argmax(predictions, axis=1)
-        return accuracy.compute(predictions=predictions, references=labels)
+    compute_metrics = get_compute_metrics(dataset)
 
     training_args = TrainingArguments(output_dir=experiment_name,
         learning_rate=2e-5, per_device_train_batch_size=4, per_device_eval_batch_size=4,
@@ -211,13 +293,15 @@ def get_test_results(tokenizer, model, test_dataloader):
     with torch.no_grad():
         for inputs in test_dataloader:
             inputs = inputs.to(device)
-            output = model(**inputs)
+            outputs = model(**inputs)
 
-            predictions = (output['logits'].argmax(1)).tolist()
+            input_ids = inputs['input_ids']
+            logits = outputs.logits
             
-            for i in range(len(predictions)):
-                original_text = tokenizer.decode(inputs['input_ids'][i], skip_special_tokes=True)
-                results.append([original_text, predictions[i]])
+            for i in range(input_ids.size(0)):
+                original_text = tokenizer.decode(input_ids[i], skip_special_tokens=True)
+                logit_values = ';'.join(map(str, logits[i].detach().tolist()))
+                results.append([original_text, logit_values])
     
     return results
 
@@ -229,9 +313,7 @@ def save_results(results, path):
 def run_fine_tuning_experiment(tokenizer, model, dataset, experiment_number):
     wandb.login()
 
-    dataset_dict = get_dataset(dataset)
-    train_dataset = tokenize_dataset(tokenizer, dataset_dict["train"])
-    test_dataset = tokenize_dataset(tokenizer, dataset_dict["test"])
+    train_dataset, test_dataset = prepare_dataset(tokenizer, dataset)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
