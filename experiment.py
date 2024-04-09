@@ -347,7 +347,7 @@ def get_test_results(tokenizer, model, test_dataloader):
     return results
 
 def save_results(results, path):
-    df = pd.DataFrame(results, columns=['text', 'prediction'])
+    df = pd.DataFrame(results, columns=['text', 'label', 'logits', 'embedding'])
     df.to_csv(f'{path}.csv')
     return None
 
