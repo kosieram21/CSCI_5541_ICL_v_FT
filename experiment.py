@@ -333,7 +333,7 @@ def get_test_results(tokenizer, model, test_dataloader):
             outputs = model(**inputs)
 
             input_ids = inputs['input_ids']
-            labels = inputs['labels']
+            labels = inputs['labels'].detach()
             logits = outputs.logits
             embeddings = outputs.hidden_states[-1].mean(dim=1)
             
