@@ -16,13 +16,15 @@ from datasets import load_dataset
 MODEL_NAME = "mistralai/Mistral-7B-v0.1"
 
 class RegressionDataset(Dataset):
-    def __init__(self, encodings, labels):
+    def __init__(self, texts, encodings, labels):
+        self.texts = texts
         self.encodings = encodings
         self.labels = labels
 
     def __getitem__(self, idx):
         item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
-        item['labels'] = torch.tensor(self.labels[idx], dtype=torch.float32)
+        item['text'] = self.texts[idx]
+        item['label'] = torch.tensor(self.labels[idx], dtype=torch.float32)
         return item
 
     def __len__(self):
@@ -68,49 +70,74 @@ def get_dataset(dataset):
     elif dataset == Dataset.CnnDailyMail:
         return load_dataset("cnn_dailymail", "3.0.0")
     else:
-        raise ValueError("f{dataset.value} is not a valid dataset!")
+        raise ValueError("f{dataset.name} is not a valid dataset!")
 
 def prepare_classification_dataset(tokenizer, dataset):
     tokenize = lambda sample: tokenizer(sample['text'])
     dataset_dict = get_dataset(dataset)
-    train_dataset = dataset_dict["train"].map(tokenize,batched=True)
+    train_dataset = dataset_dict["train"].map(tokenize, batched=True)
     test_dataset = dataset_dict["test"].map(tokenize, batched=True)
     return train_dataset, test_dataset
 
-def prepare_regression_dataset(tokenizer, dataset):
+def prepare_philip_may_stsb_multi_mt_dataset(tokenizer, dataset):
     dataset_dict = get_dataset(dataset)
-    if dataset == Dataset.PhilipMayStsbMultiMt:
-        delimiter = "[SEP]"
-        train_dataset = dataset_dict["train"]
-        train_encodings = tokenizer([sample["sentence1"] + delimiter + sample["sentence2"] for sample in train_dataset])
-        train_labels = [sample["similarity_score"] for sample in train_dataset]
-        test_dataset = dataset_dict["test"]
-        test_encodings = tokenizer([sample["sentence1"] + delimiter + sample["sentence2"] for sample in test_dataset])
-        test_labels = [sample["similarity_score"] for sample in test_dataset]
-        train_dataset = RegressionDataset(train_encodings, train_labels)
-        test_dataset = RegressionDataset(test_encodings, test_labels)
-    elif dataset == Dataset.Se2pCodeReadabilityMerged:
-        dataset = dataset_dict["train"]
-        encodings = tokenizer([sample["code_snippet"] for sample in dataset])
-        labels = [sample["score"] for sample in dataset]
-        regression_dataset = RegressionDataset(encodings, labels)
-        train_size = int(0.8 * len(regression_dataset))
-        test_size = len(regression_dataset) - train_size
-        train_dataset, test_dataset = random_split(regression_dataset, [train_size, test_size])
-    elif dataset == Dataset.ZpnBaceRegression:
-        delimiter = "[SEP]"
-        train_dataset = dataset_dict["train"]
-        train_encodings = tokenizer([sample["smiles"] + delimiter + sample["selfies"] for sample in train_dataset])
-        train_labels = [sample["target"] for sample in train_dataset]
-        test_dataset = dataset_dict["test"]
-        test_encodings = tokenizer([sample["smiles"] + delimiter + sample["selfies"] for sample in test_dataset])
-        test_labels = [sample["target"] for sample in test_dataset]
-        train_dataset = RegressionDataset(train_encodings, train_labels)
-        test_dataset = RegressionDataset(test_encodings, test_labels)
-    else:
-        raise ValueError("f{dataset.value} is not a valid regression dataset!")
+    delimiter = "[SEP]"
+
+    train_dataset = dataset_dict["train"]
+    train_texts = [sample["sentence1"] + delimiter + sample["sentence2"] for sample in train_dataset]
+    train_encodings = tokenizer(train_texts)
+    train_labels = [sample["similarity_score"] for sample in train_dataset]
+
+    test_dataset = dataset_dict["test"]
+    test_texts = [sample["sentence1"] + delimiter + sample["sentence2"] for sample in test_dataset]
+    test_encodings = tokenizer(test_texts)
+    test_labels = [sample["similarity_score"] for sample in test_dataset]
+
+    train_dataset = RegressionDataset(train_texts, train_encodings, train_labels)
+    test_dataset = RegressionDataset(test_texts, test_encodings, test_labels)
     return train_dataset, test_dataset
 
+def prepare_se2p_code_readability_merged(tokenizer, dataset):
+    dataset_dict = get_dataset(dataset)
+    dataset = dataset_dict["train"]
+
+    texts = [sample["code_snippet"] for sample in dataset]
+    encodings = tokenizer(texts)
+    labels = [sample["score"] for sample in dataset]
+    regression_dataset = RegressionDataset(texts, encodings, labels)
+
+    train_size = int(0.8 * len(regression_dataset))
+    test_size = len(regression_dataset) - train_size
+    train_dataset, test_dataset = random_split(regression_dataset, [train_size, test_size])
+    return train_dataset, test_dataset
+
+def prepare_zpn_bace_regression(tokenizer, dataset):
+    dataset_dict = get_dataset(dataset)
+    delimiter = "[SEP]"
+
+    train_dataset = dataset_dict["train"]
+    train_texts = [sample["smiles"] + delimiter + sample["selfies"] for sample in train_dataset]
+    train_encodings = tokenizer(train_texts)
+    train_labels = [sample["target"] for sample in train_dataset]
+
+    test_dataset = dataset_dict["test"]
+    test_texts = [sample["smiles"] + delimiter + sample["selfies"] for sample in test_dataset]
+    test_encodings = tokenizer(test_texts)
+    test_labels = [sample["target"] for sample in test_dataset]
+
+    train_dataset = RegressionDataset(train_texts, train_encodings, train_labels)
+    test_dataset = RegressionDataset(test_texts, test_encodings, test_labels)
+    return train_dataset, test_dataset
+
+def prepare_regression_dataset(tokenizer, dataset):
+    if dataset == Dataset.PhilipMayStsbMultiMt:
+        return prepare_philip_may_stsb_multi_mt_dataset(tokenizer, dataset)    
+    elif dataset == Dataset.Se2pCodeReadabilityMerged:
+        return prepare_se2p_code_readability_merged(tokenizer, dataset)
+    elif dataset == Dataset.ZpnBaceRegression:
+        return prepare_zpn_bace_regression(tokenizer, dataset)    
+    else:
+        raise ValueError("f{dataset.name} is not a valid regression dataset!")
 
 def prepare_dataset(tokenizer, dataset):
     task = get_task(dataset)
@@ -119,7 +146,7 @@ def prepare_dataset(tokenizer, dataset):
     elif task == Task.Regression:
         return prepare_regression_dataset(tokenizer, dataset)
     else:
-        raise ValueError("f{task.value} is not a valid task!")
+        raise ValueError("f{task.name} is not a valid task!")
     
 def get_task(dataset):
     if dataset == Dataset.DairAiEmotion or dataset == Dataset.ClimatebertClimateDetection or dataset == Dataset.RottenTomatoes:
@@ -129,7 +156,7 @@ def get_task(dataset):
     elif dataset == Dataset.HelsinkiNlpOpus100 or dataset == Dataset.DatabricksDolly15k or dataset == Dataset.CnnDailyMail:
         return Task.Generation
     else:
-        raise ValueError("f{dataset.value} is not a valid dataset!")
+        raise ValueError("f{dataset.name} is not a valid dataset!")
     
 def get_labels(dataset):
     if dataset == Dataset.DairAiEmotion:
@@ -139,7 +166,7 @@ def get_labels(dataset):
     elif dataset == Dataset.RottenTomatoes:
         return ["neg", "pos"]
     else:
-        raise ValueError("f{dataset.value} is not a valid classification dataset!")
+        raise ValueError("f{dataset.name} is not a valid classification dataset!")
     
 def get_tokenizer(model_name):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -147,10 +174,13 @@ def get_tokenizer(model_name):
     return tokenizer
 
 def get_icl_model(model_name):
-    return AutoModelForCausalLM.from_pretrained(model_name)
+    config = AutoConfig.from_pretrained(model_name)
+    config.output_hidden_states = True
+    return AutoModelForCausalLM.from_pretrained(model_name, config=config)
 
 def get_classification_model(model_name, labels, tokenizer, quantization_config):
     config = AutoConfig.from_pretrained(model_name)
+    config.output_hidden_states = True
     config.num_labels = len(labels)
     config.id2label = {i: label for i, label in enumerate(labels)}
     config.label2id = {label: i for i, label in config.id2label.items()}
@@ -159,6 +189,7 @@ def get_classification_model(model_name, labels, tokenizer, quantization_config)
 
 def get_regression_model(model_name, tokenizer, quantization_config):
     config = AutoConfig.from_pretrained(model_name)
+    config.output_hidden_states = True
     config.num_labels = 1
     config.pad_token_id = tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0]
     return AutoModelForSequenceClassification.from_pretrained(model_name, config=config, quantization_config=quantization_config)
@@ -182,7 +213,7 @@ def get_ft_model(model_name, dataset, tokenizer):
     elif task == Task.Generation:
         return get_generation_model(model_name, quantization_config)
     else:
-        raise ValueError("f{task.value} is not a valid task!")
+        raise ValueError("f{task.name} is not a valid task!")
 
 def prepare_model_for_peft(model):
     lora_config = LoraConfig(
@@ -203,7 +234,7 @@ def get_model(model_name, approach, dataset):
         model = get_ft_model(model_name, dataset, tokenizer)
         model = prepare_model_for_peft(model)
     else:
-        raise ValueError(f"{approach.value} is not a valid learning approach!")
+        raise ValueError(f"{approach.name} is not a valid learning approach!")
     return tokenizer, model
 
 def get_system_prompt(dataset):
@@ -213,8 +244,23 @@ def get_system_prompt(dataset):
         return "Label the following text as either discussing climate (yes) or not (no).\n"
     elif dataset == Dataset.RottenTomatoes:
         return "Label the following text as either negative (neg) or positive (pos).\n"
+    elif dataset == Dataset.PhilipMayStsbMultiMt:
+        return "Label the similarity on a scale of [0 to 5] for the following sentence pairs.\n"
+    elif dataset == Dataset.Se2pCodeReadabilityMerged:
+        return "Label the readability on a scale of [1 to 5] for the following code snippets.\n"
+    elif dataset == Dataset.ZpnBaceRegression:
+        return "Report the IC50 binding affinity to BACE-1 [-3 to 3] of the following smiles and selfies chemical data.\n"
     else:
-        raise ValueError("f{dataset.value} is not a valid dataset!")
+        raise ValueError("f{dataset.name} is not a valid dataset!")
+    
+def generate_prompt(sample, train_dataset, id2label, num_shots):
+        prompt = get_system_prompt(dataset)
+        for i in range(num_shots):
+            random_sample_index = randint(0, train_dataset.num_rows)
+            training_sample = f"Text: {train_dataset[random_sample_index]['text']} Label: {id2label[train_dataset[random_sample_index]['label']]}\n"
+            prompt += training_sample
+        prompt += f'Text: {sample} Label:'
+        return prompt
 
 def run_in_context_learning_experiment(tokenizer, model, dataset, experiment_number):
     train_dataset, test_dataset = prepare_dataset(tokenizer, dataset)
@@ -222,22 +268,13 @@ def run_in_context_learning_experiment(tokenizer, model, dataset, experiment_num
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    def generate_prompt(sample, num_shots, data, id2label):
-        prompt = get_system_prompt(dataset)
-        for i in range(num_shots):
-            random_sample_index = randint(0, data.num_rows)
-            training_sample = f"Text: {data[random_sample_index]['text']} Label: {id2label[data[random_sample_index]['label']]}\n"
-            prompt += training_sample
-        prompt += f'Text: {sample} Label:'
-        return prompt
-
     labels = get_labels(dataset)
     id2label = {i : label for i, label in enumerate(labels)}
 
     results = []
 
     for i in range(len(test_dataset)):
-        prompt = generate_prompt(test_dataset[i]['text'], 4, train_dataset, id2label)
+        prompt = generate_prompt(test_dataset[i]['text'], train_dataset, id2label, 4)
         input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
         output = model.generate(input_ids, do_sample=True, max_new_tokens=10, top_p=0.9)
         text = tokenizer.batch_decode(output, skip_special_tokens=True)[0]
@@ -292,16 +329,20 @@ def get_test_results(tokenizer, model, test_dataloader):
 
     with torch.no_grad():
         for inputs in test_dataloader:
-            inputs = inputs.to(device)
+            inputs = {k: v.to(device) for k, v in inputs.items()}
             outputs = model(**inputs)
 
             input_ids = inputs['input_ids']
+            labels = inputs['labels']
             logits = outputs.logits
+            embeddings = outputs.hidden_states[-1].mean(dim=1)
             
             for i in range(input_ids.size(0)):
                 original_text = tokenizer.decode(input_ids[i], skip_special_tokens=True)
-                logit_values = ';'.join(map(str, logits[i].detach().tolist()))
-                results.append([original_text, logit_values])
+                label = labels[i]
+                logit_values = ';'.join(map(str, logits[i].tolist()))
+                embedding = ';'.join(map(str, embeddings[i].tolist()))
+                results.append([original_text, label, logit_values, embedding])
     
     return results
 
