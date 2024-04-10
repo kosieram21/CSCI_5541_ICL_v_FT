@@ -8,31 +8,33 @@ from torch.utils.data import Dataset, random_split
 from random import randint
 from enum import Enum
 from sklearn.metrics import mean_squared_error
+from sacrebleu.metrics import BLEU
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModelForSequenceClassification, AutoConfig
-from transformers import TrainingArguments, Trainer, DataCollatorWithPadding, BitsAndBytesConfig
+from transformers import Seq2SeqTrainingArguments, TrainingArguments, Seq2SeqTrainer, Trainer, DataCollatorWithPadding, BitsAndBytesConfig
 from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
 from datasets import load_dataset
 
 MODEL_NAME = "mistralai/Mistral-7B-v0.1"
 
-class RegressionDataset(Dataset):
-    def __init__(self, texts, encodings, labels):
+class ExperimentDataset(Dataset):
+    def __init__(self, texts, encodings, labels, ttype = torch.float32):
         self.texts = texts
         self.encodings = encodings
         self.labels = labels
+        self.ttype = ttype
 
     def __getitem__(self, idx):
         item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
         item['text'] = self.texts[idx]
-        item['label'] = torch.tensor(self.labels[idx], dtype=torch.float32)
+        item['label'] = torch.tensor(self.labels[idx], dtype=self.ttype)
         return item
 
     def __len__(self):
         return len(self.labels)
 
 class Approach(Enum):
-    ICL = 1
-    FT = 2
+    FT = 1
+    ICL = 2
 
 class Dataset(Enum):
     DairAiEmotion = 1
@@ -93,8 +95,8 @@ def prepare_philip_may_stsb_multi_mt_dataset(tokenizer, dataset):
     test_encodings = tokenizer(test_texts)
     test_labels = [sample["similarity_score"] for sample in test_dataset]
 
-    train_dataset = RegressionDataset(train_texts, train_encodings, train_labels)
-    test_dataset = RegressionDataset(test_texts, test_encodings, test_labels)
+    train_dataset = ExperimentDataset(train_texts, train_encodings, train_labels)
+    test_dataset = ExperimentDataset(test_texts, test_encodings, test_labels)
     return train_dataset, test_dataset
 
 def prepare_se2p_code_readability_merged(tokenizer, dataset):
@@ -104,11 +106,11 @@ def prepare_se2p_code_readability_merged(tokenizer, dataset):
     texts = [sample["code_snippet"] for sample in dataset]
     encodings = tokenizer(texts)
     labels = [sample["score"] for sample in dataset]
-    regression_dataset = RegressionDataset(texts, encodings, labels)
+    dataset = ExperimentDataset(texts, encodings, labels)
 
-    train_size = int(0.8 * len(regression_dataset))
-    test_size = len(regression_dataset) - train_size
-    train_dataset, test_dataset = random_split(regression_dataset, [train_size, test_size])
+    train_size = int(0.8 * len(dataset))
+    test_size = len(dataset) - train_size
+    train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
     return train_dataset, test_dataset
 
 def prepare_zpn_bace_regression(tokenizer, dataset):
@@ -125,8 +127,8 @@ def prepare_zpn_bace_regression(tokenizer, dataset):
     test_encodings = tokenizer(test_texts)
     test_labels = [sample["target"] for sample in test_dataset]
 
-    train_dataset = RegressionDataset(train_texts, train_encodings, train_labels)
-    test_dataset = RegressionDataset(test_texts, test_encodings, test_labels)
+    train_dataset = ExperimentDataset(train_texts, train_encodings, train_labels)
+    test_dataset = ExperimentDataset(test_texts, test_encodings, test_labels)
     return train_dataset, test_dataset
 
 def prepare_regression_dataset(tokenizer, dataset):
@@ -138,6 +140,71 @@ def prepare_regression_dataset(tokenizer, dataset):
         return prepare_zpn_bace_regression(tokenizer, dataset)    
     else:
         raise ValueError("f{dataset.name} is not a valid regression dataset!")
+    
+def prepare_helsinki_nlp_opus100(tokenizer, dataset):
+    dataset_dict = get_dataset(dataset)
+    delimiter = "[SEP]"
+
+    train_dataset = dataset_dict["train"]
+    dataset_size = len(train_dataset)
+    train_size = int(0.1 * dataset_size)
+    train_dataset, _ = random_split(train_dataset, [train_size, dataset_size - train_size])
+
+    train_texts = [sample["translation"]["en"] + delimiter + sample["translation"]["es"] for sample in train_dataset]
+    train_encodings = tokenizer(train_texts)
+    train_labels = train_encodings['input_ids']
+
+    test_dataset = dataset_dict["test"]
+    test_texts = [sample["translation"]["en"] + delimiter + sample["translation"]["es"] for sample in test_dataset]
+    test_encodings = tokenizer(test_texts)
+    test_labels = test_encodings['input_ids']
+
+    train_dataset = ExperimentDataset(train_texts, train_encodings, train_labels, torch.long)
+    test_dataset = ExperimentDataset(test_texts, test_encodings, test_labels, torch.long)
+    return train_dataset, test_dataset
+    
+def prepare_databricks_dolly15k(tokenizer, dataset):
+    # dataset_dict = get_dataset(dataset)
+    # dataset = dataset_dict["train"]
+
+    # sources = [sample["instruction"] for sample in dataset]
+    # targets = [sample["response"] for sample in dataset]
+    # generation_dataset = GenerationDataset(sources, targets)
+
+    # train_size = int(0.8 * len(generation_dataset))
+    # test_size = len(generation_dataset) - train_size
+    # train_dataset, test_dataset = random_split(generation_dataset, [train_size, test_size])
+    # return train_dataset, test_dataset
+    return None
+
+def prepare_cnn_dailymail(tokenizer, dataset):
+    # dataset_dict = get_dataset(dataset)
+    # train_dataset = dataset_dict["train"]
+    # dataset_size = len(train_dataset)
+    # train_size = int(0.5 * dataset_size)
+    # train_dataset, _ = random_split(train_dataset, [train_size, dataset_size - train_size])
+
+    # train_sources = [sample["article"] for sample in train_dataset]
+    # train_targets = [sample["highlights"] for sample in train_dataset]
+    # train_dataset = GenerationDataset(train_sources, train_targets)
+
+    # test_dataset = dataset_dict["test"]
+    # test_sources = [sample["article"] for sample in test_dataset]
+    # test_targets = [sample["highlights"] for sample in test_dataset]
+    # test_dataset = GenerationDataset(test_sources, test_targets)
+
+    # return train_dataset, test_dataset
+    return None
+
+def prepare_generation_dataset(tokenizer, dataset):
+    if dataset == Dataset.HelsinkiNlpOpus100:
+        return prepare_helsinki_nlp_opus100(tokenizer, dataset)
+    elif dataset == Dataset.DatabricksDolly15k:
+        return prepare_databricks_dolly15k(tokenizer, dataset)
+    elif dataset == Dataset.CnnDailyMail:
+        return prepare_cnn_dailymail(tokenizer, dataset)
+    else:
+        raise ValueError("f{dataset.name} is not a valid generation dataset!")
 
 def prepare_dataset(tokenizer, dataset):
     task = get_task(dataset)
@@ -145,18 +212,10 @@ def prepare_dataset(tokenizer, dataset):
         return prepare_classification_dataset(tokenizer, dataset)
     elif task == Task.Regression:
         return prepare_regression_dataset(tokenizer, dataset)
+    elif task == Task.Generation:
+        return prepare_generation_dataset(tokenizer, dataset)
     else:
         raise ValueError("f{task.name} is not a valid task!")
-    
-def get_task(dataset):
-    if dataset == Dataset.DairAiEmotion or dataset == Dataset.ClimatebertClimateDetection or dataset == Dataset.RottenTomatoes:
-        return Task.Classification
-    elif dataset == Dataset.PhilipMayStsbMultiMt or dataset == Dataset.Se2pCodeReadabilityMerged or dataset == Dataset.ZpnBaceRegression:
-        return Task.Regression
-    elif dataset == Dataset.HelsinkiNlpOpus100 or dataset == Dataset.DatabricksDolly15k or dataset == Dataset.CnnDailyMail:
-        return Task.Generation
-    else:
-        raise ValueError("f{dataset.name} is not a valid dataset!")
     
 def get_labels(dataset):
     if dataset == Dataset.DairAiEmotion:
@@ -168,10 +227,23 @@ def get_labels(dataset):
     else:
         raise ValueError("f{dataset.name} is not a valid classification dataset!")
     
+def get_task(dataset):
+    if dataset == Dataset.DairAiEmotion or dataset == Dataset.ClimatebertClimateDetection or dataset == Dataset.RottenTomatoes:
+        return Task.Classification
+    elif dataset == Dataset.PhilipMayStsbMultiMt or dataset == Dataset.Se2pCodeReadabilityMerged or dataset == Dataset.ZpnBaceRegression:
+        return Task.Regression
+    elif dataset == Dataset.HelsinkiNlpOpus100 or dataset == Dataset.DatabricksDolly15k or dataset == Dataset.CnnDailyMail:
+        return Task.Generation
+    else:
+        raise ValueError("f{dataset.name} is not a valid dataset!")
+    
 def get_tokenizer(model_name):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
+
+def tokenize(tokenizer, sample):
+    return None
 
 def get_icl_model(model_name):
     config = AutoConfig.from_pretrained(model_name)
@@ -194,8 +266,11 @@ def get_regression_model(model_name, tokenizer, quantization_config):
     config.pad_token_id = tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0]
     return AutoModelForSequenceClassification.from_pretrained(model_name, config=config, quantization_config=quantization_config)
 
-def get_generation_model(model_name, quantization_config):
-    return None
+def get_generation_model(model_name, tokenizer, quantization_config):
+    config = AutoConfig.from_pretrained(model_name)
+    config.output_hidden_states = True
+    config.pad_token_id = tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0]
+    return AutoModelForCausalLM.from_pretrained(model_name, config=config, quantization_config=quantization_config)
 
 def get_ft_model(model_name, dataset, tokenizer):
     quantization_config = BitsAndBytesConfig(
@@ -211,7 +286,7 @@ def get_ft_model(model_name, dataset, tokenizer):
     elif task == Task.Regression:
         return get_regression_model(model_name, tokenizer, quantization_config)
     elif task == Task.Generation:
-        return get_generation_model(model_name, quantization_config)
+        return get_generation_model(model_name, tokenizer, quantization_config)
     else:
         raise ValueError("f{task.name} is not a valid task!")
 
@@ -237,52 +312,6 @@ def get_model(model_name, approach, dataset):
         raise ValueError(f"{approach.name} is not a valid learning approach!")
     return tokenizer, model
 
-def get_system_prompt(dataset):
-    if dataset == Dataset.DairAiEmotion:
-        return "Label the following text as exhibiting either sadness, joy, love, anger, fear or surprise.\n"
-    elif dataset == Dataset.ClimatebertClimateDetection:
-        return "Label the following text as either discussing climate (yes) or not (no).\n"
-    elif dataset == Dataset.RottenTomatoes:
-        return "Label the following text as either negative (neg) or positive (pos).\n"
-    elif dataset == Dataset.PhilipMayStsbMultiMt:
-        return "Label the similarity on a scale of [0 to 5] for the following sentence pairs.\n"
-    elif dataset == Dataset.Se2pCodeReadabilityMerged:
-        return "Label the readability on a scale of [1 to 5] for the following code snippets.\n"
-    elif dataset == Dataset.ZpnBaceRegression:
-        return "Report the IC50 binding affinity to BACE-1 [-3 to 3] of the following smiles and selfies chemical data.\n"
-    else:
-        raise ValueError("f{dataset.name} is not a valid dataset!")
-    
-def generate_prompt(sample, train_dataset, id2label, num_shots):
-        prompt = get_system_prompt(dataset)
-        for i in range(num_shots):
-            random_sample_index = randint(0, train_dataset.num_rows)
-            training_sample = f"Text: {train_dataset[random_sample_index]['text']} Label: {id2label[train_dataset[random_sample_index]['label']]}\n"
-            prompt += training_sample
-        prompt += f'Text: {sample} Label:'
-        return prompt
-
-def run_in_context_learning_experiment(tokenizer, model, dataset, experiment_number):
-    train_dataset, test_dataset = prepare_dataset(tokenizer, dataset)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-
-    labels = get_labels(dataset)
-    id2label = {i : label for i, label in enumerate(labels)}
-
-    results = []
-
-    for i in range(len(test_dataset)):
-        prompt = generate_prompt(test_dataset[i]['text'], train_dataset, id2label, 4)
-        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
-        output = model.generate(input_ids, do_sample=True, max_new_tokens=10, top_p=0.9)
-        text = tokenizer.batch_decode(output, skip_special_tokens=True)[0]
-        results.append([prompt, text])
-
-    experiment_name = f'mistral_in_context_learning_{dataset.name}_experiment{experiment_number}'
-    save_results(results, experiment_name)
-
 def get_compute_metrics(dataset):
     task = get_task(dataset)
     if task == Task.Classification:
@@ -296,15 +325,20 @@ def get_compute_metrics(dataset):
             predictions, labels = eval_pred
             mse = mean_squared_error(labels, predictions)
             return {"mse": mse}
+    elif task == Task.Generation:
+        def compute_metrics(eval_pred):
+            model_outputs, labels = eval_pred
+            predictions = tokenizer.batch_decode(model_outputs, skip_special_tokens=True)
+            references = tokenizer.batch_decode(labels, skip_special_tokens=True)
+            bleu = BLEU()
+            score = bleu.corpus_score(predictions, [references])
+            return {"bleu": score.score}
     else:
         raise ValueError("f{task.value} is not a valid task!")
     return compute_metrics
 
-def fine_tune(tokenizer, model, train_dataset, test_dataset, experiment_name):
-    model.train()
-
+def get_trainer(tokenizer, model,train_dataset, test_dataset, experiment_name, dataset):
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
-
     compute_metrics = get_compute_metrics(dataset)
 
     training_args = TrainingArguments(output_dir=experiment_name,
@@ -316,9 +350,14 @@ def fine_tune(tokenizer, model, train_dataset, test_dataset, experiment_name):
 
     trainer = Trainer(model=model, args=training_args,
         train_dataset=train_dataset, eval_dataset=test_dataset,
-        tokenizer=tokenizer, data_collator=collator, compute_metrics=compute_metrics,)
-    trainer.train()
+        tokenizer=tokenizer, data_collator=collator, compute_metrics=compute_metrics)
+    
+    return trainer
 
+def fine_tune(tokenizer, model, train_dataset, test_dataset, experiment_name, dataset):
+    model.train()
+    trainer = get_trainer(tokenizer, model, train_dataset, test_dataset, experiment_name, dataset)
+    trainer.train()
     return trainer.get_eval_dataloader()
 
 def get_test_results(tokenizer, model, test_dataloader):
@@ -333,7 +372,7 @@ def get_test_results(tokenizer, model, test_dataloader):
             outputs = model(**inputs)
 
             input_ids = inputs['input_ids']
-            labels = inputs['labels'].detach()
+            labels = inputs['labels']
             logits = outputs.logits
             embeddings = outputs.hidden_states[-1].mean(dim=1)
             
@@ -359,9 +398,55 @@ def run_fine_tuning_experiment(tokenizer, model, dataset, experiment_number):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    experiment_name = f'mistral_lora_fine_tuned_{dataset.name}_experiment{experiment_number}'
-    test_dataloader = fine_tune(tokenizer, model, train_dataset, test_dataset, experiment_name)
+    experiment_name = f'mistral_qlora_fine_tuned_{dataset.name}_experiment{experiment_number}'
+    test_dataloader = fine_tune(tokenizer, model, train_dataset, test_dataset, experiment_name, dataset)
     results = get_test_results(tokenizer, model, test_dataloader)
+    save_results(results, experiment_name)
+
+def get_system_prompt(dataset):
+    if dataset == Dataset.DairAiEmotion:
+        return "Label the following text as exhibiting either sadness, joy, love, anger, fear or surprise.\n"
+    elif dataset == Dataset.ClimatebertClimateDetection:
+        return "Label the following text as either discussing climate (yes) or not (no).\n"
+    elif dataset == Dataset.RottenTomatoes:
+        return "Label the following text as either negative (neg) or positive (pos).\n"
+    elif dataset == Dataset.PhilipMayStsbMultiMt:
+        return "Label the similarity on a scale of [0 to 5] for the following sentence pairs.\n"
+    elif dataset == Dataset.Se2pCodeReadabilityMerged:
+        return "Label the readability on a scale of [1 to 5] for the following code snippets.\n"
+    elif dataset == Dataset.ZpnBaceRegression:
+        return "Report the IC50 binding affinity to BACE-1 [-3 to 3] of the following smiles and selfies chemical data.\n"
+    else:
+        raise ValueError("f{dataset.name} is not a valid dataset!")
+    
+def generate_prompt(sample, train_dataset, id2label, num_shots):
+    prompt = get_system_prompt(dataset)
+    for _ in range(num_shots):
+        random_sample_index = randint(0, train_dataset.num_rows)
+        training_sample = f"Text: {train_dataset[random_sample_index]['text']} Label: {id2label[train_dataset[random_sample_index]['label']]}\n"
+        prompt += training_sample
+    prompt += f'Text: {sample} Label:'
+    return prompt
+
+def run_in_context_learning_experiment(tokenizer, model, dataset, experiment_number):
+    train_dataset, test_dataset = prepare_dataset(tokenizer, dataset)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+    labels = get_labels(dataset)
+    id2label = {i : label for i, label in enumerate(labels)}
+
+    results = []
+
+    for i in range(len(test_dataset)):
+        prompt = generate_prompt(test_dataset[i]['text'], train_dataset, id2label, 4)
+        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+        output = model.generate(input_ids, do_sample=True, max_new_tokens=10, top_p=0.9)
+        text = tokenizer.batch_decode(output, skip_special_tokens=True)[0]
+        results.append([prompt, text]) # todo: prepare this better for save results
+
+    experiment_name = f'mistral_in_context_learning_{dataset.name}_experiment{experiment_number}'
     save_results(results, experiment_name)
 
 def positive_number(value):
@@ -384,16 +469,15 @@ dataset = Dataset[args.dataset]
 num_seeds = int(args.num_seeds) if args.num_seeds else 1
 
 for i in range(num_seeds):
-    print(i)
     seed = randint(1, 1000000000)
     torch.manual_seed(seed)
 
     tokenizer, model = get_model(MODEL_NAME, approach, dataset)
 
-    if approach == Approach.ICL:
-        results = run_in_context_learning_experiment(tokenizer, model, dataset, i)
-    elif approach == Approach.FT:
+    if approach == Approach.FT:
         results = run_fine_tuning_experiment(tokenizer, model, dataset, i)
+    elif approach == Approach.ICL:
+        results = run_in_context_learning_experiment(tokenizer, model, dataset, i)
     else:
         raise ValueError(f"{approach.value} is not a valid learning approach!")
 
