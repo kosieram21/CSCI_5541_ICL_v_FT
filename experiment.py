@@ -146,15 +146,19 @@ def prepare_helsinki_nlp_opus100(tokenizer, dataset):
     delimiter = "[SEP]"
 
     train_dataset = dataset_dict["train"]
-    dataset_size = len(train_dataset)
-    train_size = int(0.1 * dataset_size)
-    train_dataset, _ = random_split(train_dataset, [train_size, dataset_size - train_size])
+    train_dataset_size = len(train_dataset)
+    train_size = int(0.001 * train_dataset_size)
+    train_dataset, _ = random_split(train_dataset, [train_size, train_dataset_size - train_size])
 
     train_texts = [sample["translation"]["en"] + delimiter + sample["translation"]["es"] for sample in train_dataset]
     train_encodings = tokenizer(train_texts)
     train_labels = train_encodings['input_ids']
 
     test_dataset = dataset_dict["test"]
+    test_dataset_size = len(test_dataset)
+    test_size = int(0.001 * test_dataset_size)
+    test_dataset, _ = random_split(test_dataset, [test_size, test_dataset_size - test_size])
+
     test_texts = [sample["translation"]["en"] + delimiter + sample["translation"]["es"] for sample in test_dataset]
     test_encodings = tokenizer(test_texts)
     test_labels = test_encodings['input_ids']
@@ -245,9 +249,10 @@ def get_tokenizer(model_name):
 def tokenize(tokenizer, sample):
     return None
 
-def get_icl_model(model_name):
+def get_icl_model(model_name, tokenizer):
     config = AutoConfig.from_pretrained(model_name)
     config.output_hidden_states = True
+    config.pad_token_id = tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0]
     return AutoModelForCausalLM.from_pretrained(model_name, config=config)
 
 def get_classification_model(model_name, labels, tokenizer, quantization_config):
@@ -304,7 +309,7 @@ def prepare_model_for_peft(model):
 def get_model(model_name, approach, dataset):
     tokenizer = get_tokenizer(model_name)
     if approach == Approach.ICL:
-        model = get_icl_model(model_name)
+        model = get_icl_model(model_name, tokenizer)
     elif approach == Approach.FT:
         model = get_ft_model(model_name, dataset, tokenizer)
         model = prepare_model_for_peft(model)
@@ -385,8 +390,8 @@ def get_test_results(tokenizer, model, test_dataloader):
     
     return results
 
-def save_results(results, path):
-    df = pd.DataFrame(results, columns=['text', 'label', 'logits', 'embedding'])
+def save_results(path, results, headers):
+    df = pd.DataFrame(results, columns=headers)
     df.to_csv(f'{path}.csv')
     return None
 
@@ -401,7 +406,7 @@ def run_fine_tuning_experiment(tokenizer, model, dataset, experiment_number):
     experiment_name = f'mistral_qlora_fine_tuned_{dataset.name}_experiment{experiment_number}'
     test_dataloader = fine_tune(tokenizer, model, train_dataset, test_dataset, experiment_name, dataset)
     results = get_test_results(tokenizer, model, test_dataloader)
-    save_results(results, experiment_name)
+    save_results(experiment_name, results, ['text', 'label', 'logits', 'embedding'])
 
 def get_system_prompt(dataset):
     if dataset == Dataset.DairAiEmotion:
@@ -422,7 +427,7 @@ def get_system_prompt(dataset):
 def generate_prompt(sample, train_dataset, id2label, num_shots):
     prompt = get_system_prompt(dataset)
     for _ in range(num_shots):
-        random_sample_index = randint(0, train_dataset.num_rows)
+        random_sample_index = randint(0, train_dataset.num_rows - 1)
         training_sample = f"Text: {train_dataset[random_sample_index]['text']} Label: {id2label[train_dataset[random_sample_index]['label']]}\n"
         prompt += training_sample
     prompt += f'Text: {sample} Label:'
@@ -437,17 +442,26 @@ def run_in_context_learning_experiment(tokenizer, model, dataset, experiment_num
     labels = get_labels(dataset)
     id2label = {i : label for i, label in enumerate(labels)}
 
-    results = []
+    for nshots in [0, 1, 2, 4]:
+        results = []
+        for i in range(len(test_dataset)):
+            print(f'experiment{experiment_number} {nshots}-shot sample: {i}')
 
-    for i in range(len(test_dataset)):
-        prompt = generate_prompt(test_dataset[i]['text'], train_dataset, id2label, 4)
-        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
-        output = model.generate(input_ids, do_sample=True, max_new_tokens=10, top_p=0.9)
-        text = tokenizer.batch_decode(output, skip_special_tokens=True)[0]
-        results.append([prompt, text]) # todo: prepare this better for save results
+            prompt = generate_prompt(test_dataset[i]['text'], train_dataset, id2label, 4)
+            tokens = tokenizer(prompt, return_tensors="pt")
+            input_ids = tokens.input_ids.to(device)
+            attention_mask = tokens.attention_mask.to(device)
 
-    experiment_name = f'mistral_in_context_learning_{dataset.name}_experiment{experiment_number}'
-    save_results(results, experiment_name)
+            label = id2label[test_dataset[i]['label']]
+            
+            output = model.generate(input_ids=input_ids, attention_mask=attention_mask, 
+                                    do_sample=True, max_new_tokens=10, top_p=0.9)
+            response = tokenizer.batch_decode(output, skip_special_tokens=True)[0]
+
+            results.append([prompt, response, label])
+
+        experiment_name = f'mistral_in_context_learning_{dataset.name}_{nshots}shots_experiment{experiment_number}'
+        save_results(experiment_name, results, ["prompt", "response", "label"])
 
 def positive_number(value):
     ivalue = int(value)
