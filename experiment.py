@@ -1,3 +1,4 @@
+import gc
 import wandb
 import argparse
 import evaluate
@@ -317,51 +318,24 @@ def get_model(model_name, approach, dataset):
         raise ValueError(f"{approach.name} is not a valid learning approach!")
     return tokenizer, model
 
-def get_compute_metrics(dataset):
-    task = get_task(dataset)
-    if task == Task.Classification:
-        accuracy = evaluate.load('accuracy')
-        def compute_metrics(eval_pred):
-            predictions, labels = eval_pred
-            predictions = np.argmax(predictions, axis=1)
-            return accuracy.compute(predictions=predictions, references=labels)
-    elif task == Task.Regression:
-        def compute_metrics(eval_pred):
-            predictions, labels = eval_pred
-            mse = mean_squared_error(labels, predictions)
-            return {"mse": mse}
-    elif task == Task.Generation:
-        def compute_metrics(eval_pred):
-            model_outputs, labels = eval_pred
-            predictions = tokenizer.batch_decode(model_outputs, skip_special_tokens=True)
-            references = tokenizer.batch_decode(labels, skip_special_tokens=True)
-            bleu = BLEU()
-            score = bleu.corpus_score(predictions, [references])
-            return {"bleu": score.score}
-    else:
-        raise ValueError("f{task.value} is not a valid task!")
-    return compute_metrics
-
-def get_trainer(tokenizer, model,train_dataset, test_dataset, experiment_name, dataset):
+def get_trainer(tokenizer, model,train_dataset, test_dataset, experiment_name):
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
-    compute_metrics = get_compute_metrics(dataset)
 
     training_args = TrainingArguments(output_dir=experiment_name,
-        learning_rate=2e-5, per_device_train_batch_size=4, per_device_eval_batch_size=4,
-        gradient_accumulation_steps=4, save_total_limit=3, 
-        num_train_epochs=2, weight_decay=0.01, evaluation_strategy='epoch', save_strategy='epoch',
+        learning_rate=2e-5, per_device_train_batch_size=4, gradient_accumulation_steps=4,
+        num_train_epochs=2, weight_decay=0.01, evaluation_strategy='no', save_strategy='no',
         report_to='wandb', logging_dir='./logs', logging_strategy='steps', logging_steps=1,
         load_best_model_at_end=True)
 
     trainer = Trainer(model=model, args=training_args,
         train_dataset=train_dataset, eval_dataset=test_dataset,
-        tokenizer=tokenizer, data_collator=collator, compute_metrics=compute_metrics)
+        tokenizer=tokenizer, data_collator=collator)
     
     return trainer
 
-def fine_tune(tokenizer, model, train_dataset, test_dataset, experiment_name, dataset):
+def fine_tune(tokenizer, model, train_dataset, test_dataset, experiment_name):
     model.train()
-    trainer = get_trainer(tokenizer, model, train_dataset, test_dataset, experiment_name, dataset)
+    trainer = get_trainer(tokenizer, model, train_dataset, test_dataset, experiment_name)
     trainer.train()
     return trainer.get_eval_dataloader()
 
@@ -404,7 +378,7 @@ def run_fine_tuning_experiment(tokenizer, model, dataset, experiment_number):
     model.to(device)
 
     experiment_name = f'mistral_qlora_fine_tuned_{dataset.name}_experiment{experiment_number}'
-    test_dataloader = fine_tune(tokenizer, model, train_dataset, test_dataset, experiment_name, dataset)
+    test_dataloader = fine_tune(tokenizer, model, train_dataset, test_dataset, experiment_name)
     results = get_test_results(tokenizer, model, test_dataloader)
     save_results(experiment_name, results, ['text', 'label', 'logits', 'embedding'])
 
@@ -495,5 +469,8 @@ for i in range(num_seeds):
     else:
         raise ValueError(f"{approach.value} is not a valid learning approach!")
 
+    model.to('cpu')
+    del model, tokenizer
+    gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
