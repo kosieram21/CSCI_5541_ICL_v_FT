@@ -12,6 +12,7 @@ from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_tr
 from datasets import load_dataset
 
 MODEL_NAME = "mistralai/Mistral-7B-v0.1"
+DELIMITER = "[SEP]"
 
 class ExperimentDataset(Dataset):
     def __init__(self, texts, encodings, labels, ttype = torch.float32):
@@ -80,15 +81,14 @@ def prepare_classification_dataset(tokenizer, dataset):
 
 def prepare_philip_may_stsb_multi_mt_dataset(tokenizer, dataset):
     dataset_dict = get_dataset(dataset)
-    delimiter = "[SEP]"
 
     train_dataset = dataset_dict["train"]
-    train_texts = [sample["sentence1"] + delimiter + sample["sentence2"] for sample in train_dataset]
+    train_texts = [sample["sentence1"] + DELIMITER + sample["sentence2"] for sample in train_dataset]
     train_encodings = tokenizer(train_texts)
     train_labels = [sample["similarity_score"] for sample in train_dataset]
 
     test_dataset = dataset_dict["test"]
-    test_texts = [sample["sentence1"] + delimiter + sample["sentence2"] for sample in test_dataset]
+    test_texts = [sample["sentence1"] + DELIMITER + sample["sentence2"] for sample in test_dataset]
     test_encodings = tokenizer(test_texts)
     test_labels = [sample["similarity_score"] for sample in test_dataset]
 
@@ -112,15 +112,14 @@ def prepare_se2p_code_readability_merged(tokenizer, dataset):
 
 def prepare_zpn_bace_regression(tokenizer, dataset):
     dataset_dict = get_dataset(dataset)
-    delimiter = "[SEP]"
 
     train_dataset = dataset_dict["train"]
-    train_texts = [sample["smiles"] + delimiter + sample["selfies"] for sample in train_dataset]
+    train_texts = [sample["smiles"] + DELIMITER + sample["selfies"] for sample in train_dataset]
     train_encodings = tokenizer(train_texts)
     train_labels = [sample["target"] for sample in train_dataset]
 
     test_dataset = dataset_dict["test"]
-    test_texts = [sample["smiles"] + delimiter + sample["selfies"] for sample in test_dataset]
+    test_texts = [sample["smiles"] + DELIMITER + sample["selfies"] for sample in test_dataset]
     test_encodings = tokenizer(test_texts)
     test_labels = [sample["target"] for sample in test_dataset]
 
@@ -140,23 +139,18 @@ def prepare_regression_dataset(tokenizer, dataset):
     
 def prepare_helsinki_nlp_opus100(tokenizer, dataset):
     dataset_dict = get_dataset(dataset)
-    delimiter = "[SEP]"
 
     train_dataset = dataset_dict["train"]
     train_dataset_size = len(train_dataset)
     train_size = int(0.001 * train_dataset_size)
     train_dataset, _ = random_split(train_dataset, [train_size, train_dataset_size - train_size])
 
-    train_texts = [sample["translation"]["en"] + delimiter + sample["translation"]["es"] for sample in train_dataset]
+    train_texts = [sample["translation"]["en"] + DELIMITER + sample["translation"]["es"] for sample in train_dataset]
     train_encodings = tokenizer(train_texts, truncation=True, max_length=512, padding="max_length")
     train_labels = [encoding_ids[1:] + [tokenizer.eos_token_id] for encoding_ids in train_encodings['input_ids']]
 
     test_dataset = dataset_dict["test"]
-    test_dataset_size = len(test_dataset)
-    test_size = int(0.001 * test_dataset_size)
-    test_dataset, _ = random_split(test_dataset, [test_size, test_dataset_size - test_size])
-
-    test_texts = [sample["translation"]["en"] + delimiter + sample["translation"]["es"] for sample in test_dataset]
+    test_texts = [sample["translation"]["en"] + DELIMITER + sample["translation"]["es"] for sample in test_dataset]
     test_encodings = tokenizer(test_texts, truncation=True, max_length=512, padding="max_length")
     test_labels = [encoding_ids[1:] + [tokenizer.eos_token_id] for encoding_ids in test_encodings['input_ids']]
 
@@ -332,7 +326,7 @@ def fine_tune(tokenizer, model, train_dataset, test_dataset, experiment_name):
     trainer.train()
     return trainer.get_eval_dataloader()
 
-def get_test_results(tokenizer, model, test_dataloader):
+def get_classification_or_regression_test_results(tokenizer, model, test_dataloader):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
 
@@ -357,10 +351,38 @@ def get_test_results(tokenizer, model, test_dataloader):
     
     return results
 
+def get_generation_test_results(tokenizer, model, test_dataloader):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.eval()
+
+    results = []
+
+    with torch.no_grad():
+        for inputs in test_dataloader:
+            input_ids = inputs['input_ids']
+            
+            for i in range(input_ids.size(0)):
+                original_text = tokenizer.decode(input_ids[i], skip_special_tokens=True)
+                parts = original_text.split(DELIMITER)
+                source = parts[0]
+                target = parts[1]
+                
+                source_tokens = tokenizer(source, return_tensors="pt")
+                source_input_ids = source_tokens.input_ids.to(device)
+                source_attention_mask = source_tokens.attention_mask.to(device)
+                generated_tokens = model.generate(input_ids=source_input_ids, attention_mask=source_attention_mask, 
+                                                  do_sample=True, max_new_tokens=10, top_p=0.9)
+                generation = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+                results.append([source, target, generation])
+                print(original_text)
+                print(source)
+                print(target)
+    
+    return results
+
 def save_results(path, results, headers):
     df = pd.DataFrame(results, columns=headers)
     df.to_csv(f'{path}.csv')
-    return None
 
 def run_fine_tuning_experiment(tokenizer, model, dataset, experiment_number):
     wandb.login()
@@ -372,8 +394,14 @@ def run_fine_tuning_experiment(tokenizer, model, dataset, experiment_number):
 
     experiment_name = f'mistral_qlora_fine_tuned_{dataset.name}_experiment{experiment_number}'
     test_dataloader = fine_tune(tokenizer, model, train_dataset, test_dataset, experiment_name)
-    results = get_test_results(tokenizer, model, test_dataloader)
-    save_results(experiment_name, results, ['text', 'label', 'logits', 'embedding'])
+
+    task = get_task(dataset)
+    if task == Task.Generation:
+        result = get_generation_test_results(tokenizer, model, test_dataloader)
+        save_results(experiment_name, results, ['source', 'target', 'generation'])
+    else:
+        results = get_classification_or_regression_test_results(tokenizer, model, test_dataloader)
+        save_results(experiment_name, results, ['text', 'label', 'logits', 'embedding'])
 
 def get_system_prompt(dataset):
     if dataset == Dataset.DairAiEmotion:
