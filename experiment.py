@@ -1,17 +1,13 @@
 import gc
 import wandb
 import argparse
-import evaluate
 import torch
-import numpy as np
 import pandas as pd
 from torch.utils.data import Dataset, random_split
 from random import randint
 from enum import Enum
-from sklearn.metrics import mean_squared_error
-from sacrebleu.metrics import BLEU
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModelForSequenceClassification, AutoConfig
-from transformers import Seq2SeqTrainingArguments, TrainingArguments, Seq2SeqTrainer, Trainer, DataCollatorWithPadding, BitsAndBytesConfig
+from transformers import TrainingArguments, Trainer, DataCollatorWithPadding, BitsAndBytesConfig
 from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
 from datasets import load_dataset
 
@@ -152,8 +148,8 @@ def prepare_helsinki_nlp_opus100(tokenizer, dataset):
     train_dataset, _ = random_split(train_dataset, [train_size, train_dataset_size - train_size])
 
     train_texts = [sample["translation"]["en"] + delimiter + sample["translation"]["es"] for sample in train_dataset]
-    train_encodings = tokenizer(train_texts)
-    train_labels = train_encodings['input_ids']
+    train_encodings = tokenizer(train_texts, truncation=True, max_length=512, padding="max_length")
+    train_labels = [encoding_ids[1:] + [tokenizer.eos_token_id] for encoding_ids in train_encodings['input_ids']]
 
     test_dataset = dataset_dict["test"]
     test_dataset_size = len(test_dataset)
@@ -161,8 +157,8 @@ def prepare_helsinki_nlp_opus100(tokenizer, dataset):
     test_dataset, _ = random_split(test_dataset, [test_size, test_dataset_size - test_size])
 
     test_texts = [sample["translation"]["en"] + delimiter + sample["translation"]["es"] for sample in test_dataset]
-    test_encodings = tokenizer(test_texts)
-    test_labels = test_encodings['input_ids']
+    test_encodings = tokenizer(test_texts, truncation=True, max_length=512, padding="max_length")
+    test_labels = [encoding_ids[1:] + [tokenizer.eos_token_id] for encoding_ids in test_encodings['input_ids']]
 
     train_dataset = ExperimentDataset(train_texts, train_encodings, train_labels, torch.long)
     test_dataset = ExperimentDataset(test_texts, test_encodings, test_labels, torch.long)
@@ -247,9 +243,6 @@ def get_tokenizer(model_name):
     tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
 
-def tokenize(tokenizer, sample):
-    return None
-
 def get_icl_model(model_name, tokenizer):
     config = AutoConfig.from_pretrained(model_name)
     config.output_hidden_states = True
@@ -318,7 +311,7 @@ def get_model(model_name, approach, dataset):
         raise ValueError(f"{approach.name} is not a valid learning approach!")
     return tokenizer, model
 
-def get_trainer(tokenizer, model,train_dataset, test_dataset, experiment_name):
+def get_trainer(tokenizer, model, train_dataset, test_dataset, experiment_name):
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
     training_args = TrainingArguments(output_dir=experiment_name,
