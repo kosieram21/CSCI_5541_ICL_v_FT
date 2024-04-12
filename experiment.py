@@ -402,7 +402,9 @@ def generate_prompt(sample, train_dataset, id2label, num_shots):
     prompt = get_system_prompt(dataset)
     for _ in range(num_shots):
         random_sample_index = randint(0, train_dataset.num_rows - 1)
-        training_sample = f"Text: {train_dataset[random_sample_index]['text']} Label: {id2label[train_dataset[random_sample_index]['label']]}\n"
+        text = train_dataset[random_sample_index]['text']
+        label = id2label[train_dataset[random_sample_index]['label']] if id2label else train_dataset[random_sample_index]['label']
+        training_sample = f"Text: {text} Label: {label}\n"
         prompt += training_sample
     prompt += f'Text: {sample} Label:'
     return prompt
@@ -413,8 +415,9 @@ def run_in_context_learning_experiment(tokenizer, model, dataset, experiment_num
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
+    task = get_task(dataset)
     labels = get_labels(dataset)
-    id2label = {i : label for i, label in enumerate(labels)}
+    id2label = {i : label for i, label in enumerate(labels)} if task == Task.Classification else None
 
     for nshots in [0, 1, 2, 4]:
         results = []
@@ -426,7 +429,7 @@ def run_in_context_learning_experiment(tokenizer, model, dataset, experiment_num
             input_ids = tokens.input_ids.to(device)
             attention_mask = tokens.attention_mask.to(device)
 
-            label = id2label[test_dataset[i]['label']]
+            label = id2label[test_dataset[i]['label']] if id2label else test_dataset[i]['label']
             
             output = model.generate(input_ids=input_ids, attention_mask=attention_mask, 
                                     do_sample=True, max_new_tokens=10, top_p=0.9)
