@@ -311,7 +311,7 @@ def get_trainer(tokenizer, model, train_dataset, test_dataset, experiment_name):
     training_args = TrainingArguments(output_dir=experiment_name,
         learning_rate=2e-5, per_device_train_batch_size=4, gradient_accumulation_steps=4,
         num_train_epochs=2, weight_decay=0.01, evaluation_strategy='no', save_strategy='no',
-        report_to='wandb', logging_dir='./logs', logging_strategy='steps', logging_steps=1,
+        #report_to='wandb', logging_dir='./logs', logging_strategy='steps', logging_steps=1,
         load_best_model_at_end=True)
 
     trainer = Trainer(model=model, args=training_args,
@@ -374,9 +374,6 @@ def get_generation_test_results(tokenizer, model, test_dataloader):
                                                   do_sample=True, max_new_tokens=10, top_p=0.9)
                 generation = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
                 results.append([source, target, generation])
-                print(original_text)
-                print(source)
-                print(target)
     
     return results
 
@@ -385,7 +382,7 @@ def save_results(path, results, headers):
     df.to_csv(f'{path}.csv')
 
 def run_fine_tuning_experiment(tokenizer, model, dataset, experiment_number):
-    wandb.login()
+    #wandb.login()
 
     train_dataset, test_dataset = prepare_dataset(tokenizer, dataset)
 
@@ -397,7 +394,7 @@ def run_fine_tuning_experiment(tokenizer, model, dataset, experiment_number):
 
     task = get_task(dataset)
     if task == Task.Generation:
-        result = get_generation_test_results(tokenizer, model, test_dataloader)
+        results = get_generation_test_results(tokenizer, model, test_dataloader)
         save_results(experiment_name, results, ['source', 'target', 'generation'])
     else:
         results = get_classification_or_regression_test_results(tokenizer, model, test_dataloader)
@@ -416,18 +413,48 @@ def get_system_prompt(dataset):
         return "Label the readability on a scale of [1 to 5] for the following code snippets.\n"
     elif dataset == Dataset.ZpnBaceRegression:
         return "Report the IC50 binding affinity to BACE-1 [-3 to 3] of the following smiles and selfies chemical data.\n"
+    elif dataset == Dataset.HelsinkiNlpOpus100:
+        return "Translate the following english sentences into spanish.\n"
     else:
         raise ValueError("f{dataset.name} is not a valid dataset!")
     
-def generate_prompt(sample, train_dataset, id2label, num_shots):
-    prompt = get_system_prompt(dataset)
-    for _ in range(num_shots):
-        random_sample_index = randint(0, train_dataset.num_rows - 1)
+def get_verbalizer(dataset):
+    if dataset == Dataset.HelsinkiNlpOpus100:
+        return "English", "Spanish"
+    return "Text", "Label"
+    
+def get_demonstration(train_dataset, id2label, dataset):
+    task = get_task(dataset)
+    pattern, verbalizer = get_verbalizer(dataset)
+    random_sample_index = randint(0, train_dataset.num_rows - 1)
+    if task == Task.Generation:
+        text = train_dataset[random_sample_index]['text']
+        parts = text.split(DELIMITER)
+        source = parts[0]
+        target = parts[1]
+        demonstration = f'{pattern}: {source} {verbalizer}: {target}\n'
+        return demonstration
+    else:
         text = train_dataset[random_sample_index]['text']
         label = id2label[train_dataset[random_sample_index]['label']] if id2label else train_dataset[random_sample_index]['label']
-        training_sample = f"Text: {text} Label: {label}\n"
-        prompt += training_sample
-    prompt += f'Text: {sample} Label:'
+        demonstration = f"{pattern}: {text} {verbalizer}: {label}\n"
+        return demonstration
+    
+def prepare_sample(sample, dataset):
+    text = sample['text']
+    if dataset == Dataset.HelsinkiNlpOpus100:
+        parts = text.split(DELIMITER)
+        source = parts[0]
+        return source
+    return text
+    
+def generate_prompt(sample, train_dataset, id2label, dataset, num_shots):
+    pattern, verbalizer = get_verbalizer(dataset)
+    prompt = get_system_prompt(dataset)
+    for _ in range(num_shots):
+        demonstration = get_demonstration(train_dataset, id2label, dataset)
+        prompt += demonstration
+    prompt += f'{pattern}: {prepare_sample(sample, dataset)} {verbalizer}:'
     return prompt
 
 def run_in_context_learning_experiment(tokenizer, model, dataset, experiment_number):
@@ -437,25 +464,26 @@ def run_in_context_learning_experiment(tokenizer, model, dataset, experiment_num
     model.to(device)
 
     task = get_task(dataset)
-    labels = get_labels(dataset)
+    if task == Task.Classification:
+        labels = get_labels(dataset)
     id2label = {i : label for i, label in enumerate(labels)} if task == Task.Classification else None
 
-    for nshots in [0, 1, 2, 4]:
+    for nshots in [4]:#[0, 1, 2, 4]:
         results = []
         for i in range(len(test_dataset)):
             print(f'experiment{experiment_number} {nshots}-shot sample: {i}')
 
-            prompt = generate_prompt(test_dataset[i]['text'], train_dataset, id2label, 4)
+            prompt = generate_prompt(test_dataset[i], train_dataset, id2label, dataset, nshots)
             tokens = tokenizer(prompt, return_tensors="pt")
             input_ids = tokens.input_ids.to(device)
             attention_mask = tokens.attention_mask.to(device)
 
-            label = id2label[test_dataset[i]['label']] if id2label else test_dataset[i]['label']
+            label = test_dataset[i]['text'].split(DELIMITER)[1] if task == Task.Generation else id2label[test_dataset[i]['label']] if id2label else test_dataset[i]['label']
             
             output = model.generate(input_ids=input_ids, attention_mask=attention_mask, 
-                                    do_sample=True, max_new_tokens=10, top_p=0.9)
+                                    do_sample=True, max_new_tokens=25, top_p=0.9)
             response = tokenizer.batch_decode(output, skip_special_tokens=True)[0]
-
+            print(response)
             results.append([prompt, response, label])
 
         experiment_name = f'mistral_in_context_learning_{dataset.name}_{nshots}shots_experiment{experiment_number}'
