@@ -378,8 +378,9 @@ def get_generation_test_results(tokenizer, model, test_dataloader):
     return results
 
 def save_results(path, results, headers):
+    file_name = f'{path}.csv'
     df = pd.DataFrame(results, columns=headers)
-    df.to_csv(f'{path}.csv')
+    df.to_csv(file_name)
 
 def run_fine_tuning_experiment(tokenizer, model, dataset, experiment_number):
     #wandb.login()
@@ -426,7 +427,7 @@ def get_verbalizer(dataset):
 def get_demonstration(train_dataset, id2label, dataset):
     task = get_task(dataset)
     pattern, verbalizer = get_verbalizer(dataset)
-    random_sample_index = randint(0, train_dataset.num_rows - 1)
+    random_sample_index = randint(0, len(train_dataset) - 1)#train_dataset.num_rows - 1)
     if task == Task.Generation:
         text = train_dataset[random_sample_index]['text']
         parts = text.split(DELIMITER)
@@ -468,7 +469,7 @@ def run_in_context_learning_experiment(tokenizer, model, dataset, experiment_num
         labels = get_labels(dataset)
     id2label = {i : label for i, label in enumerate(labels)} if task == Task.Classification else None
 
-    for nshots in [4]:#[0, 1, 2, 4]:
+    for nshots in [0, 1, 2, 4]:
         results = []
         for i in range(len(test_dataset)):
             print(f'experiment{experiment_number} {nshots}-shot sample: {i}')
