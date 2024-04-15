@@ -42,8 +42,8 @@ class Dataset(Enum):
     Se2pCodeReadabilityMerged = 5
     ZpnBaceRegression = 6
     HelsinkiNlpOpus100 = 7
-    DatabricksDolly15k = 8
-    CnnDailyMail = 9
+    Mbpp = 8
+    Samsum = 9
 
 class Task(Enum):
     Classification = 1
@@ -65,10 +65,10 @@ def get_dataset(dataset):
         return load_dataset("zpn/bace_regression")
     elif dataset == Dataset.HelsinkiNlpOpus100:
         return load_dataset("Helsinki-NLP/opus-100", "en-es")
-    elif dataset == Dataset.DatabricksDolly15k:
-        return load_dataset("databricks/databricks-dolly-15k")
-    elif dataset == Dataset.CnnDailyMail:
-        return load_dataset("cnn_dailymail", "3.0.0")
+    elif dataset == Dataset.Mbpp:
+        return load_dataset("mbpp")
+    elif dataset == Dataset.Samsum:
+        return load_dataset("samsum")
     else:
         raise ValueError("f{dataset.name} is not a valid dataset!")
 
@@ -147,57 +147,62 @@ def prepare_helsinki_nlp_opus100(tokenizer, dataset):
 
     train_texts = [sample["translation"]["en"] + DELIMITER + sample["translation"]["es"] for sample in train_dataset]
     train_encodings = tokenizer(train_texts, truncation=True, max_length=512, padding="max_length")
-    train_labels = [encoding_ids[1:] + [tokenizer.eos_token_id] for encoding_ids in train_encodings['input_ids']]
+    train_labels = train_encodings['input_ids'].copy()#[encoding_ids[1:] + [tokenizer.eos_token_id] for encoding_ids in train_encodings['input_ids']]
 
     test_dataset = dataset_dict["test"]
     test_texts = [sample["translation"]["en"] + DELIMITER + sample["translation"]["es"] for sample in test_dataset]
     test_encodings = tokenizer(test_texts, truncation=True, max_length=512, padding="max_length")
-    test_labels = [encoding_ids[1:] + [tokenizer.eos_token_id] for encoding_ids in test_encodings['input_ids']]
+    test_labels = test_encodings['input_ids'].copy()#[encoding_ids[1:] + [tokenizer.eos_token_id] for encoding_ids in test_encodings['input_ids']]
 
     train_dataset = ExperimentDataset(train_texts, train_encodings, train_labels, torch.long)
     test_dataset = ExperimentDataset(test_texts, test_encodings, test_labels, torch.long)
     return train_dataset, test_dataset
     
-def prepare_databricks_dolly15k(tokenizer, dataset):
-    # dataset_dict = get_dataset(dataset)
-    # dataset = dataset_dict["train"]
+def prepare_mbpp(tokenizer, dataset):
+    dataset_dict = get_dataset(dataset)
+    
+    train_dataset = dataset_dict["train"]
+    train_texts = [sample["text"] + DELIMITER + sample["code"] for sample in train_dataset]
+    train_encodings = tokenizer(train_texts, truncation=True, max_length=512, padding="max_length")
+    train_labels = train_encodings['input_ids'].copy()#[encoding_ids[1:] + [tokenizer.eos_token_id] for encoding_ids in train_encodings['input_ids']]
 
-    # sources = [sample["instruction"] for sample in dataset]
-    # targets = [sample["response"] for sample in dataset]
-    # generation_dataset = GenerationDataset(sources, targets)
+    test_dataset = dataset_dict["test"]
+    test_texts = [sample["text"] + DELIMITER + sample["code"] for sample in test_dataset]
+    test_encodings = tokenizer(test_texts, truncation=True, max_length=512, padding="max_length")
+    test_labels = test_encodings['input_ids'].copy()#[encoding_ids[1:] + [tokenizer.eos_token_id] for encoding_ids in test_encodings['input_ids']]
 
-    # train_size = int(0.8 * len(generation_dataset))
-    # test_size = len(generation_dataset) - train_size
-    # train_dataset, test_dataset = random_split(generation_dataset, [train_size, test_size])
-    # return train_dataset, test_dataset
-    return None
+    train_dataset = ExperimentDataset(train_texts, train_encodings, train_labels, torch.long)
+    test_dataset = ExperimentDataset(test_texts, test_encodings, test_labels, torch.long)
+    return train_dataset, test_dataset
 
-def prepare_cnn_dailymail(tokenizer, dataset):
-    # dataset_dict = get_dataset(dataset)
-    # train_dataset = dataset_dict["train"]
-    # dataset_size = len(train_dataset)
-    # train_size = int(0.5 * dataset_size)
-    # train_dataset, _ = random_split(train_dataset, [train_size, dataset_size - train_size])
+def prepare_samsum(tokenizer, dataset):
+    dataset_dict = get_dataset(dataset)
 
-    # train_sources = [sample["article"] for sample in train_dataset]
-    # train_targets = [sample["highlights"] for sample in train_dataset]
-    # train_dataset = GenerationDataset(train_sources, train_targets)
+    train_dataset = dataset_dict["train"]
+    train_dataset_size = len(train_dataset)
+    train_size = int(0.02 * train_dataset_size)
+    train_dataset, _ = random_split(train_dataset, [train_size, train_dataset_size - train_size])
 
-    # test_dataset = dataset_dict["test"]
-    # test_sources = [sample["article"] for sample in test_dataset]
-    # test_targets = [sample["highlights"] for sample in test_dataset]
-    # test_dataset = GenerationDataset(test_sources, test_targets)
+    train_texts = [sample["dialogue"] + DELIMITER + sample["summary"] for sample in train_dataset]
+    train_encodings = tokenizer(train_texts, truncation=True, max_length=1024, padding="max_length")
+    train_labels = train_encodings['input_ids'].copy()#[encoding_ids[1:] + [tokenizer.eos_token_id] for encoding_ids in train_encodings['input_ids']]
 
-    # return train_dataset, test_dataset
-    return None
+    test_dataset = dataset_dict["test"]
+    test_texts = [sample["dialogue"] + DELIMITER + sample["summary"] for sample in test_dataset]
+    test_encodings = tokenizer(test_texts, truncation=True, max_length=1024, padding="max_length")
+    test_labels = test_encodings['input_ids'].copy()#[encoding_ids[1:] + [tokenizer.eos_token_id] for encoding_ids in test_encodings['input_ids']]
+
+    train_dataset = ExperimentDataset(train_texts, train_encodings, train_labels, torch.long)
+    test_dataset = ExperimentDataset(test_texts, test_encodings, test_labels, torch.long)
+    return train_dataset, test_dataset
 
 def prepare_generation_dataset(tokenizer, dataset):
     if dataset == Dataset.HelsinkiNlpOpus100:
         return prepare_helsinki_nlp_opus100(tokenizer, dataset)
-    elif dataset == Dataset.DatabricksDolly15k:
-        return prepare_databricks_dolly15k(tokenizer, dataset)
-    elif dataset == Dataset.CnnDailyMail:
-        return prepare_cnn_dailymail(tokenizer, dataset)
+    elif dataset == Dataset.Mbpp:
+        return prepare_mbpp(tokenizer, dataset)
+    elif dataset == Dataset.Samsum:
+        return prepare_samsum(tokenizer, dataset)
     else:
         raise ValueError("f{dataset.name} is not a valid generation dataset!")
 
@@ -227,7 +232,7 @@ def get_task(dataset):
         return Task.Classification
     elif dataset == Dataset.PhilipMayStsbMultiMt or dataset == Dataset.Se2pCodeReadabilityMerged or dataset == Dataset.ZpnBaceRegression:
         return Task.Regression
-    elif dataset == Dataset.HelsinkiNlpOpus100 or dataset == Dataset.DatabricksDolly15k or dataset == Dataset.CnnDailyMail:
+    elif dataset == Dataset.HelsinkiNlpOpus100 or dataset == Dataset.Mbpp or dataset == Dataset.Samsum:
         return Task.Generation
     else:
         raise ValueError("f{dataset.name} is not a valid dataset!")
@@ -311,7 +316,7 @@ def get_trainer(tokenizer, model, train_dataset, test_dataset, experiment_name):
     training_args = TrainingArguments(output_dir=experiment_name,
         learning_rate=2e-5, per_device_train_batch_size=4, gradient_accumulation_steps=4,
         num_train_epochs=2, weight_decay=0.01, evaluation_strategy='no', save_strategy='no',
-        #report_to='wandb', logging_dir='./logs', logging_strategy='steps', logging_steps=1,
+        report_to='wandb', logging_dir='./logs', logging_strategy='steps', logging_steps=1,
         load_best_model_at_end=True)
 
     trainer = Trainer(model=model, args=training_args,
@@ -364,14 +369,14 @@ def get_generation_test_results(tokenizer, model, test_dataloader):
             for i in range(input_ids.size(0)):
                 original_text = tokenizer.decode(input_ids[i], skip_special_tokens=True)
                 parts = original_text.split(DELIMITER)
-                source = parts[0]
+                source = parts[0] + DELIMITER
                 target = parts[1]
                 
                 source_tokens = tokenizer(source, return_tensors="pt")
                 source_input_ids = source_tokens.input_ids.to(device)
                 source_attention_mask = source_tokens.attention_mask.to(device)
                 generated_tokens = model.generate(input_ids=source_input_ids, attention_mask=source_attention_mask, 
-                                                  do_sample=True, max_new_tokens=10, top_p=0.9)
+                                                  do_sample=True, max_new_tokens=100, top_p=0.9)
                 generation = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
                 results.append([source, target, generation])
     
@@ -383,7 +388,7 @@ def save_results(path, results, headers):
     df.to_csv(file_name)
 
 def run_fine_tuning_experiment(tokenizer, model, dataset, experiment_number):
-    #wandb.login()
+    wandb.login()
 
     train_dataset, test_dataset = prepare_dataset(tokenizer, dataset)
 
@@ -416,12 +421,20 @@ def get_system_prompt(dataset):
         return "Report the IC50 binding affinity to BACE-1 [-3 to 3] of the following smiles and selfies chemical data.\n"
     elif dataset == Dataset.HelsinkiNlpOpus100:
         return "Translate the following english sentences into spanish.\n"
+    elif dataset == Dataset.Mbpp:
+        return "Translate the following program descriptions into code.\n"
+    elif dataset == Dataset.Samsum:
+        return "Summarize the following conversations.\n"
     else:
         raise ValueError("f{dataset.name} is not a valid dataset!")
     
 def get_verbalizer(dataset):
     if dataset == Dataset.HelsinkiNlpOpus100:
         return "English", "Spanish"
+    elif dataset == Dataset.Mbpp:
+        return "Description", "Code"
+    elif dataset == Dataset.Samsum:
+        return "Dialogue", "Summary"
     return "Text", "Label"
     
 def get_demonstration(train_dataset, id2label, dataset):
@@ -442,8 +455,9 @@ def get_demonstration(train_dataset, id2label, dataset):
         return demonstration
     
 def prepare_sample(sample, dataset):
+    task = get_task(dataset)
     text = sample['text']
-    if dataset == Dataset.HelsinkiNlpOpus100:
+    if task == Task.Generation:
         parts = text.split(DELIMITER)
         source = parts[0]
         return source
@@ -482,7 +496,7 @@ def run_in_context_learning_experiment(tokenizer, model, dataset, experiment_num
             label = test_dataset[i]['text'].split(DELIMITER)[1] if task == Task.Generation else id2label[test_dataset[i]['label']] if id2label else test_dataset[i]['label']
             
             output = model.generate(input_ids=input_ids, attention_mask=attention_mask, 
-                                    do_sample=True, max_new_tokens=25, top_p=0.9)
+                                    do_sample=True, max_new_tokens=100, top_p=0.9)
             response = tokenizer.batch_decode(output, skip_special_tokens=True)[0]
             print(response)
             results.append([prompt, response, label])
