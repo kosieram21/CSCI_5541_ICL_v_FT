@@ -73,10 +73,19 @@ def get_dataset(dataset):
         raise ValueError("f{dataset.name} is not a valid dataset!")
 
 def prepare_classification_dataset(tokenizer, dataset):
+    random_seed = randint(1, 1000000)
     tokenize = lambda sample: tokenizer(sample['text'])
     dataset_dict = get_dataset(dataset)
     train_dataset = dataset_dict["train"].map(tokenize, batched=True)
-    test_dataset = dataset_dict["test"].map(tokenize, batched=True)
+    train_dataset = train_dataset.shuffle(seed=random_seed)
+    test_dataset = dataset_dict["test"]#.map(tokenize, batched=True)
+    # begin new code
+    labels = get_labels(dataset)
+    id2label = {i : label for i, label in enumerate(labels)}
+    for i in range(len(test_dataset)):
+        test_dataset[i]['text'] = generate_prompt(test_dataset[i], train_dataset, id2label, dataset, 4)
+    test_dataset = test_dataset.map(tokenize, batched=True)
+    #end of new code
     return train_dataset, test_dataset
 
 def prepare_philip_may_stsb_multi_mt_dataset(tokenizer, dataset):
@@ -184,12 +193,12 @@ def prepare_samsum(tokenizer, dataset):
     train_dataset, _ = random_split(train_dataset, [train_size, train_dataset_size - train_size])
 
     train_texts = [sample["dialogue"] + DELIMITER + sample["summary"] for sample in train_dataset]
-    train_encodings = tokenizer(train_texts, truncation=True, max_length=1024, padding="max_length")
+    train_encodings = tokenizer(train_texts, truncation=True, max_length=2048, padding="max_length")
     train_labels = train_encodings['input_ids'].copy()#[encoding_ids[1:] + [tokenizer.eos_token_id] for encoding_ids in train_encodings['input_ids']]
 
     test_dataset = dataset_dict["test"]
     test_texts = [sample["dialogue"] + DELIMITER + sample["summary"] for sample in test_dataset]
-    test_encodings = tokenizer(test_texts, truncation=True, max_length=1024, padding="max_length")
+    test_encodings = tokenizer(test_texts, truncation=True, max_length=2048, padding="max_length")
     test_labels = test_encodings['input_ids'].copy()#[encoding_ids[1:] + [tokenizer.eos_token_id] for encoding_ids in test_encodings['input_ids']]
 
     train_dataset = ExperimentDataset(train_texts, train_encodings, train_labels, torch.long)
@@ -328,7 +337,7 @@ def get_trainer(tokenizer, model, train_dataset, test_dataset, experiment_name):
 def fine_tune(tokenizer, model, train_dataset, test_dataset, experiment_name):
     model.train()
     trainer = get_trainer(tokenizer, model, train_dataset, test_dataset, experiment_name)
-    trainer.train()
+    #trainer.train()
     return trainer.get_eval_dataloader()
 
 def get_classification_or_regression_test_results(tokenizer, model, test_dataloader):
